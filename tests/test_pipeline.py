@@ -45,3 +45,31 @@ def test_inference_does_not_refit_scaler_or_models():
     pipe.predict_proba(X.iloc[splits['test']])
     np.testing.assert_array_equal(pipe.named_steps['scale'].mean_, mean)
     np.testing.assert_array_equal(pipe.named_steps['model'].weights_, weights)
+
+
+def test_posterior_probability_interval_is_reproducible_and_bounded():
+    frame = load_data(); ids = grouped_split(frame)[0]['train']
+    pipe = Pipeline([('scale', StandardScaler()), ('model', BayesianModelAverage(inclusion_prior=.2))])
+    X = feature_frame(frame)
+    pipe.fit(X.iloc[ids], (frame.iloc[ids].area > 0).astype(int))
+    scaled = pipe.named_steps['scale'].transform(X.iloc[:3])
+    bma = pipe.named_steps['model']
+    interval = bma.probability_interval(scaled)
+    assert interval.shape == (3, 2)
+    assert ((interval >= 0) & (interval <= 1)).all()
+    assert (interval[:, 0] <= interval[:, 1]).all()
+    np.testing.assert_array_equal(interval, bma.probability_interval(scaled))
+    with pytest.raises(ValueError):
+        BayesianModelAverage(inclusion_prior=0).fit(X.iloc[ids], (frame.iloc[ids].area > 0).astype(int))
+
+
+def test_bootstrap_is_grouped_reproducible_and_metric_directions():
+    from wildfire.train import cluster_bootstrap, metrics
+    y = np.array([0, 1, 0, 1, 0, 1])
+    p = np.array([.1, .8, .2, .9, .3, .7])
+    groups = np.array(['a', 'a', 'b', 'b', 'c', 'c'])
+    result = cluster_bootstrap(y, {'perfect': p}, groups, {'perfect': .5}, n_boot=20)
+    pd.testing.assert_frame_equal(result, cluster_bootstrap(y, {'perfect': p}, groups, {'perfect': .5}, n_boot=20))
+    assert result[result.metric == 'roc_auc'].lower_95.iloc[0] == 1
+    assert (result.lower_95 <= result.upper_95).all()
+    assert metrics(y, p, .5)['balanced_accuracy'] == 1
