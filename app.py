@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT / 'src'))
 from wildfire.data import MONTHS, feature_frame, validate_inputs, load_data
 
-st.set_page_config(page_title='Ember | Wildfire Intelligence', layout='wide', initial_sidebar_state='expanded')
+st.set_page_config(page_title='Ember | Wildfire Intelligence', layout='wide', initial_sidebar_state='auto')
 st.markdown('''<style>
 .stApp {background: #f7f8f4;}
 .block-container {max-width: 1440px; padding-top: 2rem; padding-bottom: 2rem;}
@@ -120,6 +120,7 @@ with predict_tab:
             month = a.selectbox('Month', MONTHS, index=7)
             st.markdown('**Fire Weather Index components**')
             st.caption('Use externally computed indices; they are not derived from one day of weather.')
+            a, b = st.columns(2)
             ffmc = a.number_input('FFMC · fine fuel moisture', min_value=0.0, max_value=101.0, value=90.0)
             dmc = b.number_input('DMC · duff moisture', min_value=0.0, value=110.0)
             dc = a.number_input('DC · drought code', min_value=0.0, value=550.0)

@@ -73,3 +73,43 @@ def test_bootstrap_is_grouped_reproducible_and_metric_directions():
     assert result[result.metric == 'roc_auc'].lower_95.iloc[0] == 1
     assert (result.lower_95 <= result.upper_95).all()
     assert metrics(y, p, .5)['balanced_accuracy'] == 1
+
+
+@pytest.mark.parametrize('column,value', [('temp', np.inf), ('DMC', np.nan), ('wind', -1),
+                                         ('FFMC', 102), ('RH', 101), ('month', 'january')])
+def test_invalid_uploaded_measurements_fail_validation(column, value):
+    from wildfire.data import validate_inputs
+    sample = load_data().iloc[:1].copy()
+    sample[column] = value
+    with pytest.raises((ValueError, TypeError)):
+        validate_inputs(sample)
+
+
+def test_missing_schema_and_normalized_month():
+    from wildfire.data import validate_inputs
+    sample = load_data().iloc[:1].copy()
+    with pytest.raises(ValueError, match='Missing columns'):
+        validate_inputs(sample.drop(columns=['temp']))
+    sample['month'] = ' AUG '
+    assert validate_inputs(sample).month.iloc[0] == 'aug'
+
+
+def test_persisted_results_match_shared_test_predictions():
+    from wildfire.data import ROOT
+    from wildfire.train import metrics
+    predictions = pd.read_csv(ROOT / 'artifacts/test_predictions.csv')
+    comparison = pd.read_csv(ROOT / 'artifacts/model_comparison.csv')
+    assignments = pd.read_csv(ROOT / 'artifacts/split_assignments.csv')
+    np.testing.assert_array_equal(sorted(predictions.row_id), sorted(assignments[assignments.split == 'test'].row_id))
+    for row in comparison.itertuples():
+        actual = metrics(predictions.y_true.to_numpy(), predictions[row.algorithm].to_numpy(), row.threshold)
+        for metric, value in actual.items():
+            assert np.isclose(value, getattr(row, 'test_' + metric))
+
+
+def test_sparse_model_prior_is_applied_to_uninformative_data():
+    X = np.zeros((40, 10)); y = np.array([0, 1] * 20)
+    model = BayesianModelAverage(inclusion_prior=.2).fit(X, y)
+    for subset, weight in zip(model.models_, model.weights_):
+        n = 0 if subset['name'] == 'intercept_only' else len(subset['name'].split(' + '))
+        assert np.isclose(weight, .2**n * .8**(4-n))
