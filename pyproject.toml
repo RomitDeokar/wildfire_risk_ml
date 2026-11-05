@@ -7,10 +7,10 @@ name = "wildfire-risk-bma"
 version = "1.0.0"
 description = "Bayesian model averaging for positive recorded burned-area probability"
 requires-python = ">=3.11"
-dependencies = ["numpy>=2.1,<3", "pandas>=2.2,<4", "scipy>=1.14,<2", "scikit-learn>=1.6,<2", "matplotlib>=3.9,<4", "streamlit>=1.40,<2", "joblib>=1.4,<2"]
+dependencies = ["numpy>=2.1,<3", "pandas>=2.2,<4", "scipy>=1.14,<2", "scikit-learn>=1.6,<2", "matplotlib>=3.9,<4", "streamlit>=1.50,<2", "joblib>=1.4,<2"]
 
 [project.optional-dependencies]
-dev = ["jupyterlab>=4,<5", "nbformat>=5.10,<6", "nbclient>=0.10,<1", "ipykernel>=6,<8", "pytest>=8,<10"]
+dev = ["jupyterlab>=4,<5", "nbformat>=5.10,<6", "nbclient>=0.10,<1", "ipykernel>=6,<8", "pytest>=8,<10", "reportlab>=4,<6", "python-pptx>=1,<2"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
