@@ -1,6 +1,6 @@
 """Bayesian logistic subset averaging with Laplace marginal likelihoods.
 
-Equal prior over the 16 block subsets; independent N(0, prior_scale**2)
+Independent Bernoulli block-inclusion model prior over 16 subsets; independent N(0, prior_scale**2)
 coefficients, including intercept. Predictive integration uses Gauss-Hermite
 quadrature over each linear predictor's Laplace Gaussian posterior.
 """
@@ -16,7 +16,8 @@ from .data import BLOCKS
 
 
 class BayesianModelAverage(ClassifierMixin, BaseEstimator):
-    def __init__(self, prior_scale=1.0, quadrature_points=20):
+    def __init__(self, prior_scale=1.0, quadrature_points=20, inclusion_prior=0.5):
+        self.inclusion_prior = inclusion_prior
         self.prior_scale = prior_scale
         self.quadrature_points = quadrature_points
 
@@ -24,6 +25,8 @@ class BayesianModelAverage(ClassifierMixin, BaseEstimator):
         X, y = np.asarray(X, dtype=float), np.asarray(y, dtype=int)
         if self.prior_scale <= 0 or set(np.unique(y)) != {0, 1}:
             raise ValueError('Positive prior scale and both binary classes are required.')
+        if not 0 < self.inclusion_prior < 1:
+            raise ValueError("inclusion_prior must lie strictly between 0 and 1.")
         self.classes_ = np.array([0, 1])
         self.n_features_in_ = X.shape[1]
         self.models_ = []
@@ -59,8 +62,10 @@ class BayesianModelAverage(ClassifierMixin, BaseEstimator):
             evidence = -fit.fun - k * np.log(self.prior_scale) - .5 * logdet
             self.models_.append(dict(name=' + '.join(names) or 'intercept_only',
                                      columns=columns, mean=fit.x, covariance=np.linalg.inv(H),
-                                     log_evidence=float(evidence), gradient_max=grad_norm))
-        log_evidence = np.array([m['log_evidence'] for m in self.models_])
+                                     log_evidence=float(evidence), gradient_max=grad_norm,
+                                     log_model_prior=float(len(names) * np.log(self.inclusion_prior)
+                                         + (len(BLOCKS) - len(names)) * np.log1p(-self.inclusion_prior))))
+        log_evidence = np.array([m['log_evidence'] + m['log_model_prior'] for m in self.models_])
         self.weights_ = np.exp(log_evidence - logsumexp(log_evidence))
         return self
 
@@ -77,6 +82,28 @@ class BayesianModelAverage(ClassifierMixin, BaseEstimator):
             predictions.append(expit(z) @ weights / np.sqrt(np.pi))
         return np.column_stack(predictions)
 
+    def probability_interval(self, X, n_draws=2000, random_state=42):
+        """Pointwise 90% latent-probability credible interval, conditional on this family.
+
+        Samples both the model index and its Laplace coefficient posterior. This is
+        not a frequentist confidence interval, an outcome interval, or protection
+        against dataset bias. Intended for small interactive scenario batches.
+        """
+        check_is_fitted(self, 'weights_')
+        if n_draws < 100:
+            raise ValueError('Use at least 100 posterior draws.')
+        X = np.asarray(X, dtype=float)
+        rng = np.random.default_rng(random_state)
+        choices = rng.choice(len(self.models_), size=n_draws, p=self.weights_)
+        draws = np.empty((len(X), n_draws))
+        for i, model in enumerate(self.models_):
+            mask = choices == i
+            if mask.any():
+                beta = rng.multivariate_normal(model['mean'], model['covariance'], size=mask.sum())
+                design = np.column_stack([np.ones(len(X)), X[:, model['columns']]])
+                draws[:, mask] = expit(design @ beta.T)
+        return np.quantile(draws, [.05, .95], axis=1).T
+
     def predict_proba(self, X):
         p = self.candidate_probabilities(X) @ self.weights_
         return np.column_stack([1 - p, p])
@@ -88,5 +115,6 @@ class BayesianModelAverage(ClassifierMixin, BaseEstimator):
         check_is_fitted(self, 'weights_')
         return pd.DataFrame([{'candidate': m['name'], 'weight': w,
                               'log_evidence': m['log_evidence'],
+                              'log_model_prior': m['log_model_prior'],
                               'parameters': len(m['mean']), 'gradient_max': m['gradient_max']}
                              for m, w in zip(self.models_, self.weights_)]).sort_values('weight', ascending=False)

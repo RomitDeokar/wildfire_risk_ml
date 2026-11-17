@@ -45,3 +45,71 @@ def test_inference_does_not_refit_scaler_or_models():
     pipe.predict_proba(X.iloc[splits['test']])
     np.testing.assert_array_equal(pipe.named_steps['scale'].mean_, mean)
     np.testing.assert_array_equal(pipe.named_steps['model'].weights_, weights)
+
+
+def test_posterior_probability_interval_is_reproducible_and_bounded():
+    frame = load_data(); ids = grouped_split(frame)[0]['train']
+    pipe = Pipeline([('scale', StandardScaler()), ('model', BayesianModelAverage(inclusion_prior=.2))])
+    X = feature_frame(frame)
+    pipe.fit(X.iloc[ids], (frame.iloc[ids].area > 0).astype(int))
+    scaled = pipe.named_steps['scale'].transform(X.iloc[:3])
+    bma = pipe.named_steps['model']
+    interval = bma.probability_interval(scaled)
+    assert interval.shape == (3, 2)
+    assert ((interval >= 0) & (interval <= 1)).all()
+    assert (interval[:, 0] <= interval[:, 1]).all()
+    np.testing.assert_array_equal(interval, bma.probability_interval(scaled))
+    with pytest.raises(ValueError):
+        BayesianModelAverage(inclusion_prior=0).fit(X.iloc[ids], (frame.iloc[ids].area > 0).astype(int))
+
+
+def test_bootstrap_is_grouped_reproducible_and_metric_directions():
+    from wildfire.train import cluster_bootstrap, metrics
+    y = np.array([0, 1, 0, 1, 0, 1])
+    p = np.array([.1, .8, .2, .9, .3, .7])
+    groups = np.array(['a', 'a', 'b', 'b', 'c', 'c'])
+    result = cluster_bootstrap(y, {'perfect': p}, groups, {'perfect': .5}, n_boot=20)
+    pd.testing.assert_frame_equal(result, cluster_bootstrap(y, {'perfect': p}, groups, {'perfect': .5}, n_boot=20))
+    assert result[result.metric == 'roc_auc'].lower_95.iloc[0] == 1
+    assert (result.lower_95 <= result.upper_95).all()
+    assert metrics(y, p, .5)['balanced_accuracy'] == 1
+
+
+@pytest.mark.parametrize('column,value', [('temp', np.inf), ('DMC', np.nan), ('wind', -1),
+                                         ('FFMC', 102), ('RH', 101), ('month', 'january')])
+def test_invalid_uploaded_measurements_fail_validation(column, value):
+    from wildfire.data import validate_inputs
+    sample = load_data().iloc[:1].copy()
+    sample[column] = value
+    with pytest.raises((ValueError, TypeError)):
+        validate_inputs(sample)
+
+
+def test_missing_schema_and_normalized_month():
+    from wildfire.data import validate_inputs
+    sample = load_data().iloc[:1].copy()
+    with pytest.raises(ValueError, match='Missing columns'):
+        validate_inputs(sample.drop(columns=['temp']))
+    sample['month'] = ' AUG '
+    assert validate_inputs(sample).month.iloc[0] == 'aug'
+
+
+def test_persisted_results_match_shared_test_predictions():
+    from wildfire.data import ROOT
+    from wildfire.train import metrics
+    predictions = pd.read_csv(ROOT / 'artifacts/test_predictions.csv')
+    comparison = pd.read_csv(ROOT / 'artifacts/model_comparison.csv')
+    assignments = pd.read_csv(ROOT / 'artifacts/split_assignments.csv')
+    np.testing.assert_array_equal(sorted(predictions.row_id), sorted(assignments[assignments.split == 'test'].row_id))
+    for row in comparison.itertuples():
+        actual = metrics(predictions.y_true.to_numpy(), predictions[row.algorithm].to_numpy(), row.threshold)
+        for metric, value in actual.items():
+            assert np.isclose(value, getattr(row, 'test_' + metric))
+
+
+def test_sparse_model_prior_is_applied_to_uninformative_data():
+    X = np.zeros((40, 10)); y = np.array([0, 1] * 20)
+    model = BayesianModelAverage(inclusion_prior=.2).fit(X, y)
+    for subset, weight in zip(model.models_, model.weights_):
+        n = 0 if subset['name'] == 'intercept_only' else len(subset['name'].split(' + '))
+        assert np.isclose(weight, .2**n * .8**(4-n))

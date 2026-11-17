@@ -16,7 +16,8 @@ from sklearn.dummy import DummyClassifier
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (roc_auc_score, f1_score, brier_score_loss, log_loss,
-                             roc_curve, confusion_matrix, ConfusionMatrixDisplay)
+                             roc_curve, confusion_matrix, ConfusionMatrixDisplay,
+                             precision_score, recall_score, accuracy_score, balanced_accuracy_score)
 from sklearn.model_selection import GridSearchCV, GroupKFold
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -35,7 +36,11 @@ def metrics(y, p, threshold):
     return {'roc_auc': float(roc_auc_score(y, p)),
             'f1': float(f1_score(y, p >= threshold, zero_division=0)),
             'brier': float(brier_score_loss(y, p)), 'log_loss': float(log_loss(y, p)),
-            'f1_at_0_5': float(f1_score(y, p >= .5, zero_division=0))}
+            'f1_at_0_5': float(f1_score(y, p >= .5, zero_division=0)),
+            'precision': float(precision_score(y, p >= threshold, zero_division=0)),
+            'recall': float(recall_score(y, p >= threshold, zero_division=0)),
+            'accuracy': float(accuracy_score(y, p >= threshold)),
+            'balanced_accuracy': float(balanced_accuracy_score(y, p >= threshold))}
 
 
 def calibration_bins(y, p, n_bins=5):
@@ -86,6 +91,31 @@ def build_plots(out, results, predictions, weights, ytest, thresholds):
     fig.tight_layout(); fig.savefig(out / 'bma_confusion.png', dpi=160); plt.close(fig)
 
 
+def cluster_bootstrap(y, predictions, groups, thresholds, n_boot=500):
+    """Resample test cells, not rows; same resamples for every algorithm.
+
+    Intervals describe sampling variability conditional on the fitted experiment,
+    not uncertainty from retraining or an unbiased new external validation.
+    """
+    rng = np.random.default_rng(2026)
+    unique = np.unique(groups)
+    samples = {name: {metric: [] for metric in ['roc_auc', 'f1', 'brier']}
+               for name in predictions}
+    for _ in range(n_boot):
+        ids = np.concatenate([np.flatnonzero(groups == g) for g in rng.choice(unique, len(unique), replace=True)])
+        if len(np.unique(y[ids])) < 2:
+            continue
+        for name, p in predictions.items():
+            values = metrics(y[ids], p[ids], thresholds[name])
+            for metric in samples[name]:
+                samples[name][metric].append(values[metric])
+    return pd.DataFrame([{'algorithm': name, 'metric': metric,
+                          'lower_95': float(np.quantile(values, .025)),
+                          'upper_95': float(np.quantile(values, .975)),
+                          'valid_resamples': len(values)}
+                         for name, scores in samples.items() for metric, values in scores.items()])
+
+
 def run_experiment(output_dir=None):
     out = Path(output_dir or ROOT / 'artifacts'); out.mkdir(parents=True, exist_ok=True)
     frame = load_data(); X = feature_frame(frame); y = (frame.area > 0).astype(int)
@@ -99,12 +129,15 @@ def run_experiment(output_dir=None):
         if y.iloc[tr[a]].nunique() != 2 or y.iloc[tr[b]].nunique() != 2:
             raise ValueError('Inner grouped CV lacks a class.')
     specs = {
-        'BMA': (BayesianModelAverage(), {'model__prior_scale': [1.0, 2.5]}),
-        'Logistic Regression': (LogisticRegression(max_iter=2000, random_state=42), {'model__C': [.01, .1, 1, 10]}),
+        'BMA': (BayesianModelAverage(), {'model__prior_scale': [.15, .35, .7, 1.0, 2.5],
+                                        'model__inclusion_prior': [.2, .5, .8]}),
+        'Logistic Regression': (LogisticRegression(max_iter=2000, random_state=42), {'model__C': [.001, .01, .1, 1, 10, 100]}),
         'Decision Tree': (DecisionTreeClassifier(random_state=42),
-                          {'model__max_depth': [2, 4, 6], 'model__min_samples_leaf': [5, 15]}),
-        'Random Forest': (RandomForestClassifier(n_estimators=200, random_state=42, n_jobs=1),
-                          {'model__max_depth': [3, None], 'model__min_samples_leaf': [5, 15]}),
+                          {'model__max_depth': [1, 2, 4, 6], 'model__min_samples_leaf': [5, 15, 30],
+                           'model__ccp_alpha': [0.0, .01]}),
+        'Random Forest': (RandomForestClassifier(n_estimators=300, random_state=42, n_jobs=1),
+                          {'model__max_depth': [3, None], 'model__min_samples_leaf': [5, 15, 30],
+                           'model__max_features': [.5, 1.0]}),
         'Prevalence Baseline': (DummyClassifier(strategy='prior'), {})}
     models, thresholds, predictions, rows, tuning = {}, {}, {}, [], {}
     for name, (model, grid) in specs.items():
@@ -145,6 +178,8 @@ def run_experiment(output_dir=None):
     for name, p in predictions.items(): pred[name] = p
     pred.to_csv(out / 'test_predictions.csv', index=False)
     build_plots(out, results, predictions, weights, y.iloc[te].to_numpy(), thresholds)
+    cluster_bootstrap(y.iloc[te].to_numpy(), predictions, groups.iloc[te].to_numpy(), thresholds).to_csv(
+        out / 'test_metric_intervals.csv', index=False)
     summary = {name: {'records': len(ids), 'spatial_groups': int(groups.iloc[ids].nunique()),
                       'positive_fraction': float(y.iloc[ids].mean())} for name, ids in splits.items()}
     metadata = {'target': 'P(recorded area > 0 | recorded fire, predictors); proxy, not ignition probability',
@@ -154,6 +189,9 @@ def run_experiment(output_dir=None):
                 ['numpy', 'pandas', 'scipy', 'scikit-learn', 'streamlit', 'joblib']},
                 'threshold_protocol': 'Validation F1 grid search; validation F1 is selection-biased',
                 'validation_brier_protocol': 'Untouched by hyperparameter search; no calibration fitting',
+                'model_selection': 'Expanded prespecified grids; four-fold training-only grouped CV minimizes Brier. No test-based selection.',
+                'test_reuse_note': 'This is a revision of a repository with previously published test scores; the fixed test set is not a fresh external validation.',
+                'interval_protocol': '500 spatial-group bootstrap resamples, seed 2026; percentile 95% intervals, no model refitting.',
                 'uncertainty': 'Laplace evidence and coefficient posteriors are approximations; weights conditional on candidate family.'}
     (out / 'metadata.json').write_text(json.dumps(metadata, indent=2), encoding='utf-8')
     bundle = {'models': models, 'thresholds': thresholds, 'metadata': metadata,
